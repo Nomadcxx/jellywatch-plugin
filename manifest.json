@@ -1,0 +1,20 @@
+[
+  {
+    "guid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "name": "JellyWatch",
+    "overview": "Custom Jellyfin plugin that provides richer webhooks and API endpoints for the JellyWatch media organizer",
+    "description": "Companion plugin for JellyWatch media organizer - provides custom endpoints and event forwarding",
+    "owner": "Nomadcxx",
+    "category": "General",
+    "versions": [
+      {
+        "version": "1.0.0",
+        "changelog": "Initial release with custom API endpoints and event forwarding",
+        "targetAbi": "10.10.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/Nomadcxx/jellywatch-plugin/main/releases/jellywatch_1.0.0.zip",
+        "checksum": "f9625296715ad7b5043946a4a809f301",
+        "timestamp": "2026-02-26T00:00:00Z"
+      }
+    ]
+  }
+]
