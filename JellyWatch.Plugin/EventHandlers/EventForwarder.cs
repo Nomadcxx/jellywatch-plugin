@@ -1,50 +1,46 @@
-using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using JellyWatch.Plugin.Configuration;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Session;
-using MediaBrowser.Controller.Tasks;
-using MediaBrowser.Model.Activity;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Session;
+using MediaBrowser.Model.Tasks;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace JellyWatch.Plugin.EventHandlers;
 
-/// <summary>
-/// Forwards Jellyfin events to JellyWatch via HTTP POST.
-/// Provides richer payloads than the standard Webhook Plugin.
-/// </summary>
-public class EventForwarder : IServerEntryPoint, IDisposable
+public class EventForwarder : IHostedService, IDisposable
 {
     private readonly ILibraryManager _libraryManager;
     private readonly ISessionManager _sessionManager;
     private readonly ITaskManager _taskManager;
+    private readonly IMediaSourceManager _mediaSourceManager;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<EventForwarder> _logger;
 
-    /// <summary>
-    /// Initializes a new instance of the <see cref="EventForwarder"/> class.
-    /// </summary>
+    private static DateTime _lastProgressEventSent = DateTime.MinValue;
+    private bool _disposed;
+
     public EventForwarder(
         ILibraryManager libraryManager,
         ISessionManager sessionManager,
         ITaskManager taskManager,
+        IMediaSourceManager mediaSourceManager,
         IHttpClientFactory httpClientFactory,
         ILogger<EventForwarder> logger)
     {
         _libraryManager = libraryManager;
         _sessionManager = sessionManager;
         _taskManager = taskManager;
+        _mediaSourceManager = mediaSourceManager;
         _httpClientFactory = httpClientFactory;
         _logger = logger;
     }
 
-    /// <summary>
-    /// Runs when the server starts. Subscribes to all events.
-    /// </summary>
-    public Task RunAsync()
+    public Task StartAsync(CancellationToken cancellationToken)
     {
         var config = JellyWatchPlugin.Instance?.Configuration;
         if (config?.EnableEventForwarding != true)
@@ -69,14 +65,11 @@ public class EventForwarder : IServerEntryPoint, IDisposable
 
         _taskManager.TaskCompleted += OnTaskCompleted;
 
-        _logger.LogInformation("EventForwarder initialized");
+        _logger.LogInformation("EventForwarder started");
         return Task.CompletedTask;
     }
 
-    /// <summary>
-    /// Disposes resources and unsubscribes from events.
-    /// </summary>
-    public void Dispose()
+    public Task StopAsync(CancellationToken cancellationToken)
     {
         _libraryManager.ItemAdded -= OnItemAdded;
         _libraryManager.ItemRemoved -= OnItemRemoved;
@@ -85,61 +78,80 @@ public class EventForwarder : IServerEntryPoint, IDisposable
         _sessionManager.PlaybackStopped -= OnPlaybackStopped;
         _sessionManager.PlaybackProgress -= OnPlaybackProgress;
         _taskManager.TaskCompleted -= OnTaskCompleted;
+        return Task.CompletedTask;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        StopAsync(CancellationToken.None).GetAwaiter().GetResult();
+        GC.SuppressFinalize(this);
     }
 
     private async void OnItemAdded(object? sender, ItemChangeEventArgs e)
     {
-        if (!ShouldForwardEvent("ItemAdded")) return;
+        if (!ShouldForwardEvent()) return;
         await ForwardEvent("ItemAdded", BuildItemPayload(e.Item));
     }
 
     private async void OnItemRemoved(object? sender, ItemChangeEventArgs e)
     {
-        if (!ShouldForwardEvent("ItemRemoved")) return;
+        if (!ShouldForwardEvent()) return;
         await ForwardEvent("ItemRemoved", BuildItemPayload(e.Item));
     }
 
     private async void OnItemUpdated(object? sender, ItemChangeEventArgs e)
     {
-        if (!ShouldForwardEvent("ItemUpdated")) return;
+        if (!ShouldForwardEvent()) return;
         await ForwardEvent("ItemUpdated", BuildItemPayload(e.Item));
     }
 
     private async void OnPlaybackStart(object? sender, PlaybackProgressEventArgs e)
     {
-        if (!ShouldForwardEvent("PlaybackStart")) return;
+        if (!ShouldForwardEvent()) return;
         await ForwardEvent("PlaybackStart", BuildPlaybackPayload(e));
     }
 
     private async void OnPlaybackStopped(object? sender, PlaybackProgressEventArgs e)
     {
-        if (!ShouldForwardEvent("PlaybackStopped")) return;
+        if (!ShouldForwardEvent()) return;
         await ForwardEvent("PlaybackStopped", BuildPlaybackPayload(e));
     }
 
     private async void OnPlaybackProgress(object? sender, PlaybackProgressEventArgs e)
     {
-        // Only forward progress events every 30 seconds to avoid spam
-        if (DateTime.UtcNow.Second % 30 != 0) return;
-        if (!ShouldForwardEvent("PlaybackProgress")) return;
+        if ((DateTime.UtcNow - _lastProgressEventSent).TotalSeconds < 30) return;
+        if (!ShouldForwardEvent()) return;
+        _lastProgressEventSent = DateTime.UtcNow;
         await ForwardEvent("PlaybackProgress", BuildPlaybackPayload(e));
     }
 
     private async void OnTaskCompleted(object? sender, TaskCompletionEventArgs e)
     {
-        if (!ShouldForwardEvent("TaskCompleted")) return;
+        if (!ShouldForwardEvent()) return;
         await ForwardEvent("TaskCompleted", BuildTaskCompletedPayload(e));
     }
 
-    private bool ShouldForwardEvent(string eventType)
+    private static bool ShouldForwardEvent()
     {
-        var config = JellyWatchPlugin.Instance?.Configuration;
-        return config?.EnableEventForwarding == true;
+        return JellyWatchPlugin.Instance?.Configuration?.EnableEventForwarding == true;
     }
 
     private object BuildItemPayload(BaseItem item)
     {
-        var payload = new
+        var hasSubtitles = false;
+        try
+        {
+            var streams = _mediaSourceManager.GetMediaStreams(item.Id);
+            hasSubtitles = streams.Any(s => s.Type == MediaStreamType.Subtitle);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not retrieve media streams for {ItemName}", item.Name);
+        }
+
+        return new
         {
             EventType = "ItemChanged",
             Timestamp = DateTime.UtcNow.ToString("O"),
@@ -152,23 +164,20 @@ public class EventForwarder : IServerEntryPoint, IDisposable
                 ProviderIds = item.ProviderIds,
                 IsIdentified = item.ProviderIds.Count > 0,
                 LibraryName = item.GetParent()?.Name,
-                ParentId = item.ParentId?.ToString(),
-                HasLocalTrailer = item.LocalTrailerIds.Count > 0,
-                HasSubtitles = item.GetMediaStreams().Any(s => s.Type == MediaStreamType.Subtitle),
+                ParentId = item.ParentId.ToString(),
+                HasSubtitles = hasSubtitles,
                 PrimaryImagePath = item.GetImagePath(ImageType.Primary),
-                DateCreated = item.DateCreated?.ToString("O"),
-                DateModified = item.DateModified?.ToString("O")
+                DateCreated = item.DateCreated.ToString("O"),
+                DateModified = item.DateModified.ToString("O")
             }
         };
-        return payload;
     }
 
-    private object BuildPlaybackPayload(PlaybackProgressEventArgs e)
+    private static object BuildPlaybackPayload(PlaybackProgressEventArgs e)
     {
         var item = e.Item;
-        var user = e.Session.User;
 
-        var payload = new
+        return new
         {
             EventType = "Playback",
             Timestamp = DateTime.UtcNow.ToString("O"),
@@ -178,8 +187,8 @@ public class EventForwarder : IServerEntryPoint, IDisposable
                 DeviceId = e.Session.DeviceId,
                 DeviceName = e.Session.DeviceName,
                 Client = e.Session.Client,
-                UserId = user?.Id.ToString(),
-                UserName = user?.Name
+                UserId = e.Session.UserId.ToString(),
+                UserName = e.Session.UserName
             },
             Item = item != null ? new
             {
@@ -187,62 +196,36 @@ public class EventForwarder : IServerEntryPoint, IDisposable
                 Name = item.Name,
                 Path = item.Path,
                 Type = item.GetType().Name
-            } : null,
+            } : (object?)null,
             Playback = new
             {
                 PositionTicks = e.PlaybackPositionTicks,
                 DurationTicks = item?.RunTimeTicks,
-                IsPaused = e.IsPaused,
-                AudioStreamIndex = e.AudioStreamIndex,
-                SubtitleStreamIndex = e.SubtitleStreamIndex
+                IsPaused = e.IsPaused
             }
         };
-        return payload;
     }
 
-    private object BuildTaskCompletedPayload(TaskCompletionEventArgs e)
+    private static object BuildTaskCompletedPayload(TaskCompletionEventArgs e)
     {
-        var task = ReadPropertyValue(e, "Task");
-        var result = ReadPropertyValue(e, "Result");
-
         return new
         {
             EventType = "TaskCompleted",
             Timestamp = DateTime.UtcNow.ToString("O"),
             Task = new
             {
-                Id = ReadPropertyValue(task, "Id")?.ToString(),
-                Name = ReadPropertyValue(task, "Name")?.ToString()
-                    ?? ReadPropertyValue(result, "Name")?.ToString(),
-                Key = ReadPropertyValue(task, "Key")?.ToString(),
-                Category = ReadPropertyValue(task, "Category")?.ToString()
+                Id = e.Task.Id.ToString(),
+                Name = e.Task.Name,
+                Category = e.Task.Category
             },
             Result = new
             {
-                Status = ReadPropertyValue(result, "Status")?.ToString()
-                    ?? ReadPropertyValue(result, "State")?.ToString(),
-                StartTimeUtc = FormatDate(ReadPropertyValue(result, "StartTimeUtc")
-                    ?? ReadPropertyValue(result, "StartTime")),
-                EndTimeUtc = FormatDate(ReadPropertyValue(result, "EndTimeUtc")
-                    ?? ReadPropertyValue(result, "EndTime")),
-                ErrorMessage = ReadPropertyValue(result, "ErrorMessage")?.ToString(),
-                LongErrorMessage = ReadPropertyValue(result, "LongErrorMessage")?.ToString()
+                Status = e.Result.Status.ToString(),
+                StartTimeUtc = e.Result.StartTimeUtc.ToString("O"),
+                EndTimeUtc = e.Result.EndTimeUtc.ToString("O"),
+                ErrorMessage = e.Result.ErrorMessage,
+                LongErrorMessage = e.Result.LongErrorMessage
             }
-        };
-    }
-
-    private static object? ReadPropertyValue(object? source, string propertyName)
-    {
-        return source?.GetType().GetProperty(propertyName)?.GetValue(source);
-    }
-
-    private static string? FormatDate(object? value)
-    {
-        return value switch
-        {
-            DateTime dateTime => dateTime.ToString("O"),
-            DateTimeOffset dateTimeOffset => dateTimeOffset.ToString("O"),
-            _ => value?.ToString()
         };
     }
 
@@ -279,7 +262,7 @@ public class EventForwarder : IServerEntryPoint, IDisposable
                     Content = new StringContent(json, Encoding.UTF8, "application/json")
                 };
 
-                request.Headers.Add("X-JellyWatch-Secret", config.SharedSecret);
+                request.Headers.Add("X-Jellywatch-Webhook-Secret", config.SharedSecret);
                 request.Headers.Add("X-Jellyfin-Event", eventType);
 
                 var response = await client.SendAsync(request);
@@ -289,7 +272,7 @@ public class EventForwarder : IServerEntryPoint, IDisposable
                     return;
                 }
 
-                _logger.LogWarning("Failed to forward {EventType} event: {StatusCode}", 
+                _logger.LogWarning("Failed to forward {EventType} event: {StatusCode}",
                     eventType, response.StatusCode);
             }
             catch (Exception ex)
@@ -304,7 +287,7 @@ public class EventForwarder : IServerEntryPoint, IDisposable
             }
         }
 
-        _logger.LogError("Failed to forward {EventType} event after {MaxRetries} attempts", 
+        _logger.LogError("Failed to forward {EventType} event after {MaxRetries} attempts",
             eventType, maxRetries);
     }
 }

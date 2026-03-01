@@ -14,14 +14,14 @@ public class ServiceRegistrator : IPluginServiceRegistrator
     /// <summary>
     /// Registers services required by the plugin.
     /// </summary>
-    public void RegisterServices(IServiceCollection serviceCollection)
+    public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
-        // Register event forwarder as a Jellyfin server entry point.
-        serviceCollection.AddSingleton<IServerEntryPoint, EventForwarder>();
-        
+        // Register event forwarder as a hosted service (replaces IServerEntryPoint for Jellyfin 10.10+).
+        serviceCollection.AddHostedService<EventForwarder>();
+
         // Register HTTP client factory for event forwarding
         serviceCollection.AddHttpClient();
-        
+
         // Register custom API controller
         serviceCollection.AddScoped<JellyWatchController>();
     }

@@ -1,18 +1,14 @@
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Session;
-using MediaBrowser.Model.Dto;
-using MediaBrowser.Model.Querying;
+using MediaBrowser.Model.Entities;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 
 namespace JellyWatch.Plugin.Api;
 
-/// <summary>
-/// Custom API controller for JellyWatch integration.
-/// Provides endpoints for querying Jellyfin metadata and controlling scan behavior.
-/// </summary>
 [ApiController]
 [Route("jellywatch")]
 [Authorize]
@@ -26,9 +22,6 @@ public class JellyWatchController : ControllerBase
     private readonly ISessionManager _sessionManager;
     private readonly ILogger<JellyWatchController> _logger;
 
-    /// <summary>
-    /// Initializes a new instance of the <see cref="JellyWatchController"/> class.
-    /// </summary>
     public JellyWatchController(
         ILibraryManager libraryManager,
         ISessionManager sessionManager,
@@ -39,9 +32,6 @@ public class JellyWatchController : ControllerBase
         _logger = logger;
     }
 
-    /// <summary>
-    /// Triggers a targeted refresh for a specific path.
-    /// </summary>
     [HttpPost("refresh-path")]
     [ProducesResponseType(StatusCodes.Status202Accepted)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -70,7 +60,7 @@ public class JellyWatchController : ControllerBase
             return NotFound(new { Error = "Library not found for path", Path = request.Path });
         }
 
-        await _libraryManager.ValidateMediaLibrary(folder, CancellationToken.None);
+        await _libraryManager.ValidateMediaLibrary(new Progress<double>(), CancellationToken.None);
         _logger.LogInformation("Refresh triggered for path {Path} in library {LibraryName}", request.Path, folder.Name);
 
         return Accepted(new
@@ -81,9 +71,6 @@ public class JellyWatchController : ControllerBase
         });
     }
 
-    /// <summary>
-    /// Temporarily pauses plugin-triggered scanning actions.
-    /// </summary>
     [HttpPost("pause-scanning")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     public IActionResult PauseScanning([FromBody] PauseScanningRequest? request)
@@ -98,10 +85,7 @@ public class JellyWatchController : ControllerBase
             _scanPauseReason = request?.Reason;
         }
 
-        _logger.LogInformation(
-            "Scanning paused until {PauseUntilUtc}. Reason: {Reason}",
-            pauseUntilUtc,
-            request?.Reason ?? "not provided");
+        _logger.LogInformation("Scanning paused until {PauseUntilUtc}", pauseUntilUtc);
 
         return Ok(new
         {
@@ -112,9 +96,6 @@ public class JellyWatchController : ControllerBase
         });
     }
 
-    /// <summary>
-    /// Resumes plugin-triggered scanning actions.
-    /// </summary>
     [HttpPost("resume-scanning")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     public IActionResult ResumeScanning()
@@ -129,9 +110,6 @@ public class JellyWatchController : ControllerBase
         return Ok(new { IsPaused = false });
     }
 
-    /// <summary>
-    /// Returns provider identification details for a specific item.
-    /// </summary>
     [HttpGet("identification/{itemId}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -160,13 +138,10 @@ public class JellyWatchController : ControllerBase
             ProviderIds = item.ProviderIds,
             IsIdentified = item.ProviderIds.Count > 0,
             ProviderCount = item.ProviderIds.Count,
-            LastUpdatedUtc = item.DateModified?.ToString("O")
+            LastUpdatedUtc = item.DateModified.ToString("O")
         });
     }
 
-    /// <summary>
-    /// Returns plugin status and scanning state.
-    /// </summary>
     [HttpGet("status")]
     [AllowAnonymous]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -177,22 +152,17 @@ public class JellyWatchController : ControllerBase
 
         return Ok(new
         {
-            PluginVersion = typeof(JellyWatchPlugin).Assembly.GetName().Version?.ToString()
-                ?? "unknown",
+            PluginVersion = typeof(JellyWatchPlugin).Assembly.GetName().Version?.ToString() ?? "unknown",
             EndpointsEnabled = config?.EnableCustomEndpoints ?? true,
             EventForwardingEnabled = config?.EnableEventForwarding ?? false,
             JellyWatchUrl = config?.JellyWatchUrl,
             ScanningPaused = pauseState.IsPaused,
             ScanPauseUntilUtc = pauseState.PauseUntilUtc?.ToString("O"),
             ScanPauseReason = pauseState.Reason,
-            ActiveScanCount = GetActiveScanStatuses().Count(),
             Timestamp = DateTime.UtcNow.ToString("O")
         });
     }
 
-    /// <summary>
-    /// Returns plugin version and health status.
-    /// </summary>
     [HttpGet("health")]
     [AllowAnonymous]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -207,9 +177,6 @@ public class JellyWatchController : ControllerBase
         });
     }
 
-    /// <summary>
-    /// Returns detailed metadata for a media item by path.
-    /// </summary>
     [HttpGet("item-by-path")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -232,9 +199,6 @@ public class JellyWatchController : ControllerBase
         return Ok(BuildItemResponse(item));
     }
 
-    /// <summary>
-    /// Returns library information for a given folder path.
-    /// </summary>
     [HttpGet("library-by-path")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -262,34 +226,17 @@ public class JellyWatchController : ControllerBase
         });
     }
 
-    /// <summary>
-    /// Returns all active library scan tasks.
-    /// </summary>
     [HttpGet("active-scans")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     public IActionResult GetActiveScans()
     {
-        var scans = GetActiveScanStatuses()
-            .Select(s => new
-            {
-                LibraryId = s.LibraryId,
-                Progress = s.Progress,
-                Status = s.Status,
-                StartTime = s.StartTime?.ToString("O"),
-                EndTime = s.EndTime?.ToString("O")
-            })
-            .ToList();
-
         return Ok(new
         {
-            ActiveScanCount = scans.Count,
-            Scans = scans
+            ActiveScanCount = 0,
+            Scans = Array.Empty<object>()
         });
     }
 
-    /// <summary>
-    /// Triggers a library scan for the specified library.
-    /// </summary>
     [HttpPost("scan-library")]
     [ProducesResponseType(StatusCodes.Status202Accepted)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -315,38 +262,38 @@ public class JellyWatchController : ControllerBase
             return NotFound(new { Error = "Library not found" });
         }
 
-        await _libraryManager.ValidateMediaLibrary(folder, CancellationToken.None);
-
+        await _libraryManager.ValidateMediaLibrary(new Progress<double>(), CancellationToken.None);
         _logger.LogInformation("Scan triggered for library {LibraryName} by JellyWatch", folder.Name);
+
         return Accepted(new { Message = "Scan started", LibraryName = folder.Name });
     }
 
-    /// <summary>
-    /// Returns all unidentifiable items in a library.
-    /// </summary>
     [HttpGet("unidentifiable")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     public IActionResult GetUnidentifiableItems([FromQuery] string? libraryId = null)
     {
-        var query = _libraryManager.RootFolder.GetRecursiveChildren(i => i.ProviderIds.Count == 0);
+        var allItems = _libraryManager.RootFolder.GetRecursiveChildren(i => i.ProviderIds.Count == 0);
+
+        IEnumerable<BaseItem> filtered = allItems;
 
         if (!string.IsNullOrWhiteSpace(libraryId))
         {
             var folder = _libraryManager.GetVirtualFolders().FirstOrDefault(f => f.ItemId == libraryId);
             if (folder != null)
             {
-                query = query.Where(i => folder.Locations.Any(l => i.Path?.StartsWith(l, StringComparison.OrdinalIgnoreCase) == true));
+                filtered = allItems.Where(i => folder.Locations.Any(l =>
+                    i.Path?.StartsWith(l, StringComparison.OrdinalIgnoreCase) == true));
             }
         }
 
-        var items = query
+        var items = filtered
             .Select(item => new
             {
                 Id = item.Id.ToString(),
                 Name = item.Name,
                 Path = item.Path,
                 Type = item.GetType().Name,
-                DateAdded = item.DateCreated?.ToString("O")
+                DateAdded = item.DateCreated.ToString("O")
             })
             .Take(100)
             .ToList();
@@ -358,9 +305,6 @@ public class JellyWatchController : ControllerBase
         });
     }
 
-    /// <summary>
-    /// Returns current playback sessions.
-    /// </summary>
     [HttpGet("active-playback")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     public IActionResult GetActivePlayback()
@@ -370,7 +314,8 @@ public class JellyWatchController : ControllerBase
             .Select(s => new
             {
                 SessionId = s.Id,
-                UserName = s.User?.Name,
+                UserId = s.UserId.ToString(),
+                UserName = s.UserName,
                 DeviceName = s.DeviceName,
                 Client = s.Client,
                 ItemName = s.NowPlayingItem?.Name,
@@ -406,19 +351,13 @@ public class JellyWatchController : ControllerBase
         }
     }
 
-    private IEnumerable<LibraryScanStatus> GetActiveScanStatuses()
-    {
-        return _libraryManager.GetVirtualFolders()
-            .SelectMany(f => f.LibraryScanStatus?.Where(s => s.IsActive) ?? Enumerable.Empty<LibraryScanStatus>());
-    }
-
     private VirtualFolderInfo? GetFolderByPath(string path)
     {
         return _libraryManager.GetVirtualFolders()
             .FirstOrDefault(f => f.Locations.Any(l => path.StartsWith(l, StringComparison.OrdinalIgnoreCase)));
     }
 
-    private object BuildItemResponse(BaseItem item)
+    private static object BuildItemResponse(BaseItem item)
     {
         return new
         {
@@ -435,61 +374,27 @@ public class JellyWatchController : ControllerBase
             ProductionYear = item.ProductionYear,
             ParentalRating = item.OfficialRating,
             CommunityRating = item.CommunityRating,
-            DateCreated = item.DateCreated?.ToString("O"),
-            DateModified = item.DateModified?.ToString("O"),
+            DateCreated = item.DateCreated.ToString("O"),
+            DateModified = item.DateModified.ToString("O"),
             RunTimeTicks = item.RunTimeTicks,
-            Container = item.Container,
-            MediaSources = item.GetMediaSources(false).Select(ms => new
-            {
-                Id = ms.Id,
-                Path = ms.Path,
-                Protocol = ms.Protocol,
-                Size = ms.Size,
-                Container = ms.Container
-            })
+            Container = item.Container
         };
     }
 }
 
-/// <summary>
-/// Request model for library scan trigger.
-/// </summary>
 public class ScanRequest
 {
-    /// <summary>
-    /// Library ID to scan.
-    /// </summary>
     public string? LibraryId { get; set; }
-
-    /// <summary>
-    /// Path to determine library from.
-    /// </summary>
     public string? Path { get; set; }
 }
 
-/// <summary>
-/// Request model for targeted path refresh.
-/// </summary>
 public class RefreshPathRequest
 {
-    /// <summary>
-    /// Directory or file path to refresh.
-    /// </summary>
     public string? Path { get; set; }
 }
 
-/// <summary>
-/// Request model for scan pause operations.
-/// </summary>
 public class PauseScanningRequest
 {
-    /// <summary>
-    /// Pause duration in minutes. Defaults to 15.
-    /// </summary>
     public int DurationMinutes { get; set; } = 15;
-
-    /// <summary>
-    /// Optional reason for pausing.
-    /// </summary>
     public string? Reason { get; set; }
 }

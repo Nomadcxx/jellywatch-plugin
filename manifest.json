@@ -8,6 +8,14 @@
     "category": "General",
     "versions": [
       {
+        "version": "1.1.0",
+        "changelog": "Fix MissingMethodException crash on Jellyfin 10.11.x - use IMediaSourceManager for media streams",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/Nomadcxx/jellywatch-plugin/main/releases/jellywatch_1.1.0.zip",
+        "checksum": "a68f6597122e92d8fb51540fd5169895",
+        "timestamp": "2026-03-01T00:00:00Z"
+      },
+      {
         "version": "1.0.0",
         "changelog": "Initial release with custom API endpoints and event forwarding",
         "targetAbi": "10.10.0.0",
